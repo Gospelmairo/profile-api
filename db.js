@@ -2,7 +2,6 @@
 
 /**
  * Database adapter — uses PostgreSQL when DATABASE_URL is set, otherwise SQLite.
- * This lets you develop locally without any setup, and deploy to any Postgres host.
  */
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -20,26 +19,51 @@ if (DATABASE_URL) {
   async function init() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS profiles (
-        id            TEXT PRIMARY KEY,
-        name          TEXT UNIQUE NOT NULL,
-        gender        TEXT NOT NULL,
-        gender_probability DOUBLE PRECISION NOT NULL,
-        sample_size   INTEGER NOT NULL,
-        age           INTEGER NOT NULL,
-        age_group     TEXT NOT NULL,
-        country_id    TEXT NOT NULL,
+        id                  TEXT PRIMARY KEY,
+        name                TEXT UNIQUE NOT NULL,
+        gender              TEXT NOT NULL,
+        gender_probability  DOUBLE PRECISION NOT NULL,
+        sample_size         INTEGER NOT NULL,
+        age                 INTEGER NOT NULL,
+        age_group           TEXT NOT NULL,
+        country_id          TEXT NOT NULL,
         country_probability DOUBLE PRECISION NOT NULL,
-        created_at    TEXT NOT NULL
+        created_at          TEXT NOT NULL
       )
     `);
   }
 
   async function findByName(name) {
-    const { rows } = await pool.query(
-      'SELECT * FROM profiles WHERE name = $1',
-      [name]
-    );
+    const { rows } = await pool.query('SELECT * FROM profiles WHERE name = $1', [name]);
     return rows[0] || null;
+  }
+
+  async function findById(id) {
+    const { rows } = await pool.query('SELECT * FROM profiles WHERE id = $1', [id]);
+    return rows[0] || null;
+  }
+
+  async function findAll(filters = {}) {
+    const conditions = [];
+    const values = [];
+    let i = 1;
+
+    if (filters.gender) {
+      conditions.push(`LOWER(gender) = $${i++}`);
+      values.push(filters.gender.toLowerCase());
+    }
+    if (filters.country_id) {
+      conditions.push(`LOWER(country_id) = $${i++}`);
+      values.push(filters.country_id.toLowerCase());
+    }
+    if (filters.age_group) {
+      conditions.push(`LOWER(age_group) = $${i++}`);
+      values.push(filters.age_group.toLowerCase());
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { rows } = await pool.query(`SELECT * FROM profiles ${where}`, values);
+    return rows;
   }
 
   async function insert(profile) {
@@ -57,7 +81,13 @@ if (DATABASE_URL) {
     );
   }
 
-  adapter = { init, findByName, insert };
+  async function deleteById(id) {
+    const { rowCount } = await pool.query('DELETE FROM profiles WHERE id = $1', [id]);
+    return rowCount > 0;
+  }
+
+  adapter = { init, findByName, findById, findAll, insert, deleteById };
+
 } else {
   // ── SQLite (local dev) ────────────────────────────────────────────────────
   let Database;
@@ -71,31 +101,46 @@ if (DATABASE_URL) {
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS profiles (
-      id            TEXT PRIMARY KEY,
-      name          TEXT UNIQUE NOT NULL,
-      gender        TEXT NOT NULL,
-      gender_probability REAL NOT NULL,
-      sample_size   INTEGER NOT NULL,
-      age           INTEGER NOT NULL,
-      age_group     TEXT NOT NULL,
-      country_id    TEXT NOT NULL,
+      id                  TEXT PRIMARY KEY,
+      name                TEXT UNIQUE NOT NULL,
+      gender              TEXT NOT NULL,
+      gender_probability  REAL NOT NULL,
+      sample_size         INTEGER NOT NULL,
+      age                 INTEGER NOT NULL,
+      age_group           TEXT NOT NULL,
+      country_id          TEXT NOT NULL,
       country_probability REAL NOT NULL,
-      created_at    TEXT NOT NULL
+      created_at          TEXT NOT NULL
     )
   `);
 
-  const stmtFind   = db.prepare('SELECT * FROM profiles WHERE name = ?');
-  const stmtInsert = db.prepare(`
+  const stmtFindByName = db.prepare('SELECT * FROM profiles WHERE name = ?');
+  const stmtFindById   = db.prepare('SELECT * FROM profiles WHERE id = ?');
+  const stmtInsert     = db.prepare(`
     INSERT INTO profiles
       (id, name, gender, gender_probability, sample_size, age, age_group, country_id, country_probability, created_at)
     VALUES
       (@id, @name, @gender, @gender_probability, @sample_size, @age, @age_group, @country_id, @country_probability, @created_at)
   `);
+  const stmtDelete = db.prepare('DELETE FROM profiles WHERE id = ?');
+
+  function buildFindAll(filters = {}) {
+    const conditions = [];
+    const values = [];
+    if (filters.gender)     { conditions.push('LOWER(gender) = ?');     values.push(filters.gender.toLowerCase()); }
+    if (filters.country_id) { conditions.push('LOWER(country_id) = ?'); values.push(filters.country_id.toLowerCase()); }
+    if (filters.age_group)  { conditions.push('LOWER(age_group) = ?');  values.push(filters.age_group.toLowerCase()); }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    return db.prepare(`SELECT * FROM profiles ${where}`).all(...values);
+  }
 
   adapter = {
-    init: async () => {},
-    findByName: async (name) => stmtFind.get(name) || null,
-    insert: async (profile) => stmtInsert.run(profile),
+    init:       async () => {},
+    findByName: async (name) => stmtFindByName.get(name) || null,
+    findById:   async (id)   => stmtFindById.get(id) || null,
+    findAll:    async (f)    => buildFindAll(f),
+    insert:     async (p)    => stmtInsert.run(p),
+    deleteById: async (id)   => { const r = stmtDelete.run(id); return r.changes > 0; },
   };
 }
 

@@ -24,13 +24,27 @@ function classifyAge(age) {
   return 'senior';
 }
 
-/** Returns UTC ISO-8601 without milliseconds: 2026-04-01T12:00:00Z */
 function utcNow() {
   return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function errorBody(message) {
   return { status: 'error', message };
+}
+
+function formatProfile(p) {
+  return {
+    id:                  p.id,
+    name:                p.name,
+    gender:              p.gender,
+    gender_probability:  Number(p.gender_probability),
+    sample_size:         Number(p.sample_size),
+    age:                 Number(p.age),
+    age_group:           p.age_group,
+    country_id:          p.country_id,
+    country_probability: Number(p.country_probability),
+    created_at:          p.created_at,
+  };
 }
 
 // ── Health check ──────────────────────────────────────────────────────────────
@@ -42,7 +56,7 @@ app.get('/', (req, res) => {
 app.post('/api/profiles', async (req, res) => {
   const { name } = req.body;
 
-  // 1. Input validation
+  // Input validation
   if (name === undefined || name === null || name === '') {
     return res.status(400).json(errorBody('Name is required'));
   }
@@ -51,30 +65,18 @@ app.post('/api/profiles', async (req, res) => {
   }
 
   const normalizedName = name.trim().toLowerCase();
-
   if (normalizedName === '') {
     return res.status(400).json(errorBody('Name must not be blank'));
   }
 
-  // 2. Idempotency — return existing record without hitting external APIs again
+  // Idempotency check
   try {
     const existing = await db.findByName(normalizedName);
     if (existing) {
       return res.status(200).json({
         status: 'success',
         message: 'Profile already exists',
-        data: {
-          id:                 existing.id,
-          name:               existing.name,
-          gender:             existing.gender,
-          gender_probability: Number(existing.gender_probability),
-          sample_size:        Number(existing.sample_size),
-          age:                Number(existing.age),
-          age_group:          existing.age_group,
-          country_id:         existing.country_id,
-          country_probability: Number(existing.country_probability),
-          created_at:         existing.created_at,
-        },
+        data: formatProfile(existing),
       });
     }
   } catch (err) {
@@ -82,7 +84,7 @@ app.post('/api/profiles', async (req, res) => {
     return res.status(500).json(errorBody('Internal server error'));
   }
 
-  // 3. Call all three external APIs in parallel
+  // Call all three external APIs in parallel
   let genderData, agifyData, nationalizeData;
   try {
     const [gRes, aRes, nRes] = await Promise.all([
@@ -90,33 +92,31 @@ app.post('/api/profiles', async (req, res) => {
       axios.get(`https://api.agify.io/?name=${encodeURIComponent(normalizedName)}`),
       axios.get(`https://api.nationalize.io/?name=${encodeURIComponent(normalizedName)}`),
     ]);
-    genderData     = gRes.data;
-    agifyData      = aRes.data;
+    genderData      = gRes.data;
+    agifyData       = aRes.data;
     nationalizeData = nRes.data;
   } catch (err) {
     console.error('External API error:', err.message);
-    const status = err.response ? 502 : 500;
-    const msg    = err.response ? 'External API returned an error' : 'Failed to reach external API';
-    return res.status(status).json(errorBody(msg));
+    return res.status(502).json(errorBody('External API returned an error'));
   }
 
-  // 4. Edge-case validation on API responses
+  // Edge-case validation — each returns 502 naming the offending API
   if (!genderData.gender || genderData.count === 0) {
-    return res.status(422).json(errorBody('Insufficient gender data for this name'));
+    return res.status(502).json(errorBody('Genderize returned an invalid response'));
   }
   if (agifyData.age === null || agifyData.age === undefined) {
-    return res.status(422).json(errorBody('Insufficient age data for this name'));
+    return res.status(502).json(errorBody('Agify returned an invalid response'));
   }
   if (!nationalizeData.country || nationalizeData.country.length === 0) {
-    return res.status(422).json(errorBody('Insufficient nationality data for this name'));
+    return res.status(502).json(errorBody('Nationalize returned an invalid response'));
   }
 
-  // 5. Aggregate & classify
+  // Aggregate & classify
   const gender             = genderData.gender;
   const gender_probability = genderData.probability;
   const sample_size        = genderData.count;
 
-  const age      = agifyData.age;
+  const age       = agifyData.age;
   const age_group = classifyAge(age);
 
   const topCountry        = nationalizeData.country.reduce(
@@ -125,7 +125,7 @@ app.post('/api/profiles', async (req, res) => {
   const country_id          = topCountry.country_id;
   const country_probability = topCountry.probability;
 
-  // 6. Persist
+  // Persist
   const id         = uuidv7();
   const created_at = utcNow();
 
@@ -147,18 +147,7 @@ app.post('/api/profiles', async (req, res) => {
         return res.status(200).json({
           status: 'success',
           message: 'Profile already exists',
-          data: {
-            id:                 existing.id,
-            name:               existing.name,
-            gender:             existing.gender,
-            gender_probability: Number(existing.gender_probability),
-            sample_size:        Number(existing.sample_size),
-            age:                Number(existing.age),
-            age_group:          existing.age_group,
-            country_id:         existing.country_id,
-            country_probability: Number(existing.country_probability),
-            created_at:         existing.created_at,
-          },
+          data: formatProfile(existing),
         });
       }
     }
@@ -166,22 +155,74 @@ app.post('/api/profiles', async (req, res) => {
     return res.status(500).json(errorBody('Internal server error'));
   }
 
-  // 7. Return created profile
   return res.status(201).json({
     status: 'success',
-    data: {
-      id,
-      name:               normalizedName,
-      gender,
-      gender_probability,
-      sample_size,
-      age,
-      age_group,
-      country_id,
-      country_probability,
-      created_at,
-    },
+    data: formatProfile(profile),
   });
+});
+
+// ── GET /api/profiles ─────────────────────────────────────────────────────────
+app.get('/api/profiles', async (req, res) => {
+  const { gender, country_id, age_group } = req.query;
+
+  try {
+    const rows = await db.findAll({
+      gender:     gender     || undefined,
+      country_id: country_id || undefined,
+      age_group:  age_group  || undefined,
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      count: rows.length,
+      data: rows.map((p) => ({
+        id:         p.id,
+        name:       p.name,
+        gender:     p.gender,
+        age:        Number(p.age),
+        age_group:  p.age_group,
+        country_id: p.country_id,
+      })),
+    });
+  } catch (err) {
+    console.error('DB findAll error:', err);
+    return res.status(500).json(errorBody('Internal server error'));
+  }
+});
+
+// ── GET /api/profiles/:id ─────────────────────────────────────────────────────
+app.get('/api/profiles/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const profile = await db.findById(id);
+    if (!profile) {
+      return res.status(404).json(errorBody('Profile not found'));
+    }
+    return res.status(200).json({
+      status: 'success',
+      data: formatProfile(profile),
+    });
+  } catch (err) {
+    console.error('DB findById error:', err);
+    return res.status(500).json(errorBody('Internal server error'));
+  }
+});
+
+// ── DELETE /api/profiles/:id ──────────────────────────────────────────────────
+app.delete('/api/profiles/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const deleted = await db.deleteById(id);
+    if (!deleted) {
+      return res.status(404).json(errorBody('Profile not found'));
+    }
+    return res.status(204).send();
+  } catch (err) {
+    console.error('DB deleteById error:', err);
+    return res.status(500).json(errorBody('Internal server error'));
+  }
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
