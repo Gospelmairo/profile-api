@@ -60,7 +60,12 @@ if (DATABASE_URL) {
   adapter = { init, findByName, insert };
 } else {
   // ── SQLite (local dev) ────────────────────────────────────────────────────
-  const Database = require('better-sqlite3');
+  let Database;
+  try {
+    Database = require('better-sqlite3');
+  } catch {
+    throw new Error('No DATABASE_URL set and better-sqlite3 is not available. Set DATABASE_URL to use PostgreSQL.');
+  }
   const path = require('path');
   const db = new Database(path.join(__dirname, 'profiles.db'));
 
